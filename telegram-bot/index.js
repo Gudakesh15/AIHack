@@ -3,6 +3,7 @@ const axios = require('axios');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const logger = require('./logger');
+const { detectWalletAddress, getWalletData, formatWalletResponse } = require('./wallet-utils');
 require('dotenv').config();
 
 const app = express();
@@ -391,12 +392,61 @@ async function processMessage(chatId, messageText, userId, userName, requestId) 
       return;
     }
     
-    // Forward message to n8n and get AI response
+    // Check if message contains a wallet address
+    const walletDetected = detectWalletAddress(messageText);
+    
+    if (walletDetected) {
+      // Handle wallet address - fetch data directly and respond
+      logger.info('Wallet address detected, processing directly', {
+        userId,
+        userName,
+        requestId,
+        walletType: walletDetected.type,
+        addressPreview: walletDetected.address.substring(0, 8) + '...'
+      });
+      
+      try {
+        // Fetch wallet data
+        const walletData = await getWalletData(walletDetected.address, walletDetected.type);
+        
+        // Format and send response
+        const walletResponse = formatWalletResponse(walletData, walletDetected.type);
+        await sendTelegramMessage(chatId, walletResponse);
+        
+        const totalDuration = Date.now() - processingStartTime;
+        logger.info('Wallet processing completed', {
+          userId,
+          userName,
+          requestId,
+          walletType: walletDetected.type,
+          success: walletData.success,
+          totalDuration: `${totalDuration}ms`
+        });
+        
+        return; // Don't forward to n8n for wallet addresses
+      } catch (walletError) {
+        logger.error('Error processing wallet', {
+          userId,
+          requestId,
+          walletType: walletDetected.type,
+          error: walletError.message
+        });
+        
+        // Fallback to showing error and continuing to n8n
+        await sendTelegramMessage(chatId, 
+          `❌ I detected a ${walletDetected.type} wallet address but couldn't process it right now. Let me help you with general crypto questions instead!`
+        );
+        // Continue to n8n processing below...
+      }
+    }
+    
+    // Forward message to n8n and get AI response (for non-wallet messages or wallet fallback)
     logger.info('Processing message', {
       userId,
       userName,
       requestId,
-      messageLength: messageText.length
+      messageLength: messageText.length,
+      walletDetected: !!walletDetected
     });
     
     const n8nResponse = await forwardToN8n(messageText, userId, requestId);
