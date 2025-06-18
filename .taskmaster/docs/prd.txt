@@ -1,0 +1,118 @@
+🧾 Product Requirements Document (PRD)
+
+📌 Project Title: Telegram Bot Bridge for TON AI Strategist
+
+🧠 Concept Overview:
+
+A simple Telegram bot that forwards user messages to an existing n8n AI brain and returns the processed responses. This is the final missing piece to connect a fully-built crypto strategy AI system to Telegram users.
+
+🏁 Status:
+	•	✅ n8n backend with OpenAI + Perplexity integration is complete
+	•	🔄 Need to build: Telegram bot bridge (this PRD scope)
+
+⸻
+
+1. 🔧 Problem Statement
+
+We have a powerful AI backend running in n8n that can answer crypto questions, but no way for Telegram users to access it. We need a simple bridge to connect Telegram messages to our existing webhook system.
+
+⸻
+
+2. 🎯 Solution
+
+Build a lightweight Express.js application that:
+	•	Receives messages from Telegram Bot API
+	•	Forwards questions to existing n8n webhook
+	•	Returns n8n responses back to Telegram users
+	•	Handles basic error cases and rate limiting
+
+⸻
+
+3. 🛠️ Core Features to Build
+
+Feature	Description
+Telegram Bot Listener	Webhook endpoint to receive Telegram messages
+Message Forwarding	HTTP client to send user questions to n8n
+Response Handler	Process n8n output and send back via Telegram API
+Error Handling	Fallback messages when n8n is unavailable
+Rate Limiting	Basic throttling per user
+Deployment Config	Environment setup for Railway/Fly.io
+
+⸻
+
+4. 🔗 Technical Requirements
+
+Integration Points:
+	•	Telegram Bot API webhook (incoming)
+	•	n8n webhook URL (outgoing)
+	•	Telegram sendMessage API (outgoing)
+
+Required Environment Variables:
+	•	TELEGRAM_BOT_TOKEN
+	•	N8N_WEBHOOK_URL
+	•	PORT (for deployment)
+
+Core Endpoints:
+	•	POST /webhook/telegram - Receive Telegram messages
+	•	GET /health - Health check for deployment
+
+⸻
+
+5. 🧪 Implementation Flow
+
+1. User sends message to Telegram bot
+2. Telegram sends POST to /webhook/telegram
+3. Extract message text and user ID
+4. Send HTTP request to n8n webhook with question
+5. Receive processed response from n8n
+6. Format response for Telegram
+7. Send reply via Telegram Bot API
+
+⸻
+
+6. 🧰 Tech Stack
+
+Component	Tool	Purpose
+Web Server	Express.js	Handle webhooks and HTTP requests
+HTTP Client	Axios	Call n8n webhook
+Telegram API	node-telegram-bot-api or fetch	Send/receive messages
+Hosting	Railway or Fly.io	Deployment platform
+
+⸻
+
+7. 📋 Error Handling
+
+Scenario	Response
+n8n webhook down	"I'm having trouble thinking right now, try again in a moment"
+Invalid Telegram format	Log error, no response to user
+Rate limit exceeded	"Please wait a moment before asking another question"
+Network timeout	"Request took too long, please try again"
+
+⸻
+
+8. 🚀 Deployment Requirements
+
+Environment Setup:
+	•	Bot token from BotFather
+	•	n8n webhook URL (provided)
+	•	Public URL for Telegram webhook registration
+	•	Health check endpoint for uptime monitoring
+
+File Structure:
+	•	index.js - Main server file
+	•	package.json - Dependencies
+	•	.env.example - Environment template
+	•	Dockerfile or Railway config
+
+⸻
+
+9. 📈 Success Criteria
+
+	•	✅ Bot responds to /start command
+	•	✅ User messages successfully reach n8n
+	•	✅ n8n responses return to correct Telegram user
+	•	✅ Error states handled gracefully
+	•	✅ Deployed and accessible via public URL
+	•	✅ <3 second response time for simple queries
+
+⸻ 

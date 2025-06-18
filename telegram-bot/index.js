@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 
-// Rate limiting
+// IP-based rate limiting (existing)
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 10, // limit each IP to 10 requests per windowMs
@@ -17,6 +17,66 @@ const limiter = rateLimit({
 });
 
 app.use('/webhook', limiter);
+
+// User-based rate limiting configuration
+const USER_RATE_LIMIT = {
+  windowMs: parseInt(process.env.USER_RATE_LIMIT_WINDOW_MS) || 60 * 1000, // 1 minute window
+  maxRequests: parseInt(process.env.USER_RATE_LIMIT_MAX_REQUESTS) || 5,    // 5 requests per minute
+  message: "⏱️ Please wait a moment before asking another question. You can ask up to 5 questions per minute."
+};
+
+// In-memory store for user rate limits
+const userRequests = {};
+
+// Function to check user-based rate limit
+function checkUserRateLimit(userId) {
+  const now = Date.now();
+  
+  // Initialize user record if not exists
+  if (!userRequests[userId]) {
+    userRequests[userId] = {
+      count: 0,
+      resetAt: now + USER_RATE_LIMIT.windowMs
+    };
+  }
+  
+  // Reset counter if window has passed
+  if (now >= userRequests[userId].resetAt) {
+    userRequests[userId] = {
+      count: 0,
+      resetAt: now + USER_RATE_LIMIT.windowMs
+    };
+  }
+  
+  // Check if limit exceeded
+  if (userRequests[userId].count >= USER_RATE_LIMIT.maxRequests) {
+    const remainingTime = Math.ceil((userRequests[userId].resetAt - now) / 1000);
+    return {
+      limited: true,
+      message: `${USER_RATE_LIMIT.message}\n⏰ Try again in ${remainingTime} seconds.`,
+      resetAt: userRequests[userId].resetAt
+    };
+  }
+  
+  // Increment counter
+  userRequests[userId].count++;
+  return { limited: false };
+}
+
+// Cleanup mechanism for expired rate limit records
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  for (const userId in userRequests) {
+    if (now >= userRequests[userId].resetAt + USER_RATE_LIMIT.windowMs) {
+      delete userRequests[userId];
+      cleanedCount++;
+    }
+  }
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned up ${cleanedCount} expired user rate limit records`);
+  }
+}, 15 * 60 * 1000); // Run every 15 minutes
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -180,7 +240,7 @@ async function forwardToN8n(message, userId) {
 // Updated message processing function with n8n integration
 async function processMessage(chatId, messageText, userId, userName) {
   try {
-    // Handle /start command
+    // Handle /start command (skip rate limiting for this)
     if (messageText === '/start') {
       await sendTelegramMessage(chatId, 
         `🤖 Hello ${userName}! I'm TONNY, your crypto strategy assistant.\n\n` +
@@ -190,8 +250,16 @@ async function processMessage(chatId, messageText, userId, userName) {
       return;
     }
     
+    // Check user-specific rate limit for all other messages
+    const rateLimitCheck = checkUserRateLimit(userId);
+    if (rateLimitCheck.limited) {
+      console.log(`⏱️ Rate limit exceeded for user ${userId} (${userName})`);
+      await sendTelegramMessage(chatId, rateLimitCheck.message);
+      return;
+    }
+    
     // Forward message to n8n and get AI response
-    console.log(`🧠 Processing "${messageText}" for user ${userName}`);
+    console.log(`🧠 Processing "${messageText}" for user ${userName} (${userId})`);
     const n8nResponse = await forwardToN8n(messageText, userId);
     
     // Extract message from response
