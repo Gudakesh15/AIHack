@@ -6,10 +6,14 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "setup": "node setup.js",
+    "health": "node healthcheck.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:flow": "node test-real-flow.js",
     "test:health": "node test-real-flow.js --health",
-    "test:message": "node test-real-flow.js --message"
+    "test:message": "node test-real-flow.js --message",
+    "docker:build": "docker build -t telegram-bot-bridge .",
+    "docker:run": "docker run -p 3000:3000 --env-file .env telegram-bot-bridge"
   },
   "keywords": [
     "telegram",
