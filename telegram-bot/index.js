@@ -129,14 +129,19 @@ async function forwardToN8n(message, userId) {
       headers: {
         'Content-Type': 'application/json'
       },
-      timeout: 15000 // 15 second timeout for AI processing
+      timeout: 300000 // 5 minute timeout for AI processing
     });
     
-    console.log('✅ Received response from n8n');
+    console.log('✅ Received response from n8n:', JSON.stringify(response.data, null, 2));
     
     // Return the processed response from n8n
     // Handle different response formats
     if (response.data && typeof response.data === 'object') {
+      // Handle n8n structured output format: {"results": [{"toolCallId": "...", "result": "..."}]}
+      if (response.data.results && Array.isArray(response.data.results) && response.data.results.length > 0) {
+        return response.data.results[0].result;
+      }
+      // Handle other common formats
       return response.data.message || response.data.response || response.data;
     } else if (typeof response.data === 'string') {
       return response.data;

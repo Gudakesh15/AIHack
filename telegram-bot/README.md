@@ -81,13 +81,45 @@ Test the health endpoint:
 curl http://localhost:3000/health
 ```
 
-## 🔄 Flow
+## 🔄 Complete End-to-End Flow
 
-1. User sends message to Telegram bot
-2. Telegram forwards to `/webhook/telegram`
-3. App extracts message and forwards to n8n
-4. App receives n8n response
-5. App sends formatted reply back to Telegram user
+### **Message Journey: User → AI → User**
+
+1. **User** sends message to Telegram bot (e.g., "What's Bitcoin price?")
+2. **Telegram API** forwards to Express.js `POST /webhook/telegram`
+3. **Express.js** extracts data (chat_id, user_id, message_text) & responds 200 OK
+4. **Express.js** forwards to n8n webhook with payload:
+   ```json
+   {
+     "message": "What's Bitcoin price?",
+     "userId": 12345,
+     "source": "telegram",
+     "timestamp": "2024-..."
+   }
+   ```
+5. **n8n AI Processing Chain:**
+   - Webhook → AI Agent (chat memory) → Perplexity (research) → AI Agent1 → Structured Output Parser → Respond to Webhook
+6. **n8n** responds to Express.js with structured format:
+   ```json
+   {
+     "results": [
+       {
+         "toolCallId": "call_xyz...",
+         "result": "Bitcoin is currently trading at $45,234..."
+       }
+     ]
+   }
+   ```
+7. **Express.js** parses `response.data.results[0].result`
+8. **Express.js** sends to Telegram Bot API `/sendMessage`
+9. **User** receives AI response
+
+### **Key Architecture Notes:**
+- ✅ **Express.js acts as bridge** - All responses flow through our server
+- ✅ **Async processing** - Telegram gets immediate acknowledgment
+- ✅ **Rate limiting** - 10 requests/minute per IP
+- ✅ **Error handling** - Multiple fallback paths
+- ✅ **Memory context** - n8n maintains chat history
 
 ## 🐛 Troubleshooting
 
