@@ -1,65 +1,105 @@
 🧾 Product Requirements Document (PRD)
 
-📌 Project Title: Telegram Bot Bridge for TON AI Strategist
+📌 Project Title: "Tonny" - Your Telegram AI Crypto Companion
 
 🧠 Concept Overview:
 
-A simple Telegram bot that forwards user messages to an existing n8n AI brain and returns the processed responses. This is the final missing piece to connect a fully-built crypto strategy AI system to Telegram users.
+A Telegram bot that bridges user messages to an existing n8n AI brain and returns processed responses. This is evolving from a simple message bridge to a comprehensive crypto companion with wallet integration and personalized strategy recommendations.
 
 🏁 Status:
 	•	✅ n8n backend with OpenAI + Perplexity integration is complete
-	•	🔄 Need to build: Telegram bot bridge (this PRD scope)
+	•	✅ Basic Telegram bot bridge is functional (MVP v1)
+	•	🔄 Need to build: Wallet integration and strategy features (MVP v2)
 
 ⸻
 
 1. 🔧 Problem Statement
 
-We have a powerful AI backend running in n8n that can answer crypto questions, but no way for Telegram users to access it. We need a simple bridge to connect Telegram messages to our existing webhook system.
+We have a powerful AI backend running in n8n that can answer crypto questions, but users need more than just educational responses. To create real value for crypto newcomers, we need:
+	•	Personalized wallet analysis capabilities
+	•	Real-time market sentiment integration
+	•	Actionable investment strategies based on actual holdings
 
 ⸻
 
 2. 🎯 Solution
 
-Build a lightweight Express.js application that:
-	•	Receives messages from Telegram Bot API
-	•	Forwards questions to existing n8n webhook
-	•	Returns n8n responses back to Telegram users
-	•	Handles basic error cases and rate limiting
+Build an enhanced Express.js application that:
+	•	✅ Receives messages from Telegram Bot API (DONE)
+	•	✅ Forwards questions to existing n8n webhook (DONE)
+	•	✅ Returns n8n responses back to Telegram users (DONE)
+	•	✅ Handles basic error cases and rate limiting (DONE)
+	•	🆕 Detects wallet addresses in user messages
+	•	🆕 Fetches wallet data from TON/Ethereum APIs
+	•	🆕 Provides personalized investment strategies
+	•	🆕 Integrates real-time market sentiment analysis
 
 ⸻
 
-3. 🛠️ Core Features to Build
+3. 🛠️ Core Features
 
-Feature	Description
-Telegram Bot Listener	Webhook endpoint to receive Telegram messages
-Message Forwarding	HTTP client to send user questions to n8n
-Response Handler	Process n8n output and send back via Telegram API
-Error Handling	Fallback messages when n8n is unavailable
-Rate Limiting	Basic throttling per user
-Deployment Config	Environment setup for Railway/Fly.io
+### Phase 1: Basic Bridge (✅ COMPLETED)
+Feature	Description	Status
+Telegram Bot Listener	Webhook endpoint to receive Telegram messages	✅ Done
+Message Forwarding	HTTP client to send user questions to n8n	✅ Done
+Response Handler	Process n8n output and send back via Telegram API	✅ Done
+Error Handling	Fallback messages when n8n is unavailable	✅ Done
+Rate Limiting	Basic throttling per user (5 req/min)	✅ Done
+Deployment Config	Environment setup for Railway	✅ Done
+
+### Phase 2: Wallet Integration (🆕 NEW FEATURES)
+Feature	Description	Status
+Wallet Address Detection	Regex patterns to identify TON/ETH addresses in messages	🔄 To Build
+TON API Integration	Fetch wallet balances and token holdings	🔄 To Build
+Wallet Data Formatting	Structure wallet info for n8n consumption	🔄 To Build
+Balance Display	Show "You have X TON and Y tokens" responses	🔄 To Build
+
+### Phase 3: Strategy Recommendations (🆕 NEW FEATURES)
+Feature	Description	Status
+Market Sentiment Analysis	n8n integration with Reddit/Twitter/news APIs	🔄 To Build
+Personalized Strategy Generation	AI-powered recommendations based on holdings	🔄 To Build
+Context-Aware Responses	Include wallet data in n8n payloads	🔄 To Build
+Investment Advice Formatting	User-friendly strategy presentations	🔄 To Build
 
 ⸻
 
 4. 🔗 Technical Requirements
 
-Integration Points:
+### Existing Integration Points (✅ Working):
 	•	Telegram Bot API webhook (incoming)
 	•	n8n webhook URL (outgoing)
 	•	Telegram sendMessage API (outgoing)
 
-Required Environment Variables:
+### New Integration Points (🆕 To Add):
+	•	TON API (https://toncenter.com/api/v2/) - Wallet data
+	•	Etherscan API (fallback) - Ethereum wallet data
+	•	Enhanced n8n workflow - Market sentiment analysis
+
+### Existing Environment Variables (✅ Working):
 	•	TELEGRAM_BOT_TOKEN
 	•	N8N_WEBHOOK_URL
-	•	PORT (for deployment)
+	•	PORT
+	•	PUBLIC_URL
 
-Core Endpoints:
+### New Environment Variables (🆕 To Add):
+	•	TON_API_ENDPOINT=https://toncenter.com/api/v2/
+	•	ETHERSCAN_API_KEY (optional fallback)
+
+### Existing Endpoints (✅ Working):
 	•	POST /webhook/telegram - Receive Telegram messages
 	•	GET /health - Health check for deployment
+	•	GET /setup - Register webhook with Telegram
+
+### New Dependencies (🆕 To Add):
+	•	crypto-regex - Detect wallet addresses
+	•	ton-core - TON blockchain utilities
+	•	@orbs-network/ton-access - TON API client
 
 ⸻
 
-5. 🧪 Implementation Flow
+5. 🧪 Enhanced Implementation Flow
 
+### Existing Flow (✅ Working):
 1. User sends message to Telegram bot
 2. Telegram sends POST to /webhook/telegram
 3. Extract message text and user ID
@@ -68,51 +108,150 @@ Core Endpoints:
 6. Format response for Telegram
 7. Send reply via Telegram Bot API
 
+### New Enhanced Flow (🆕 To Build):
+1. User sends message to Telegram bot
+2. Telegram sends POST to /webhook/telegram
+3. Extract message text and user ID
+4. **🆕 Check if message contains wallet address**
+5. **🆕 If wallet detected → Fetch balance/token data from TON API**
+6. **🆕 Include wallet context in n8n payload**
+7. Send HTTP request to n8n webhook with question + wallet data
+8. **🆕 n8n processes with market sentiment analysis**
+9. Receive enhanced response from n8n
+10. Format response for Telegram
+11. Send reply via Telegram Bot API
+
 ⸻
 
-6. 🧰 Tech Stack
+6. 🎯 Demo Flow for Hackathon Judges
 
+### Educational Query (Existing):
+**User**: "What is staking?"
+**Tonny**: "Staking is locking your crypto to earn rewards... Would you like to connect a wallet for personalized insights?"
+
+### Wallet Connection (New):
+**User**: "UQAm...xyz" (shares TON wallet)
+**Tonny**: "🔍 Analyzing your wallet... You have 100 TON and 50 USDT tokens. Total value: ~$450. Want a personalized investment strategy?"
+
+### Strategy Recommendation (New):
+**User**: "Yes"
+**Tonny**: "📊 Based on your 100 TON holdings and current market trends:
+	• Consider staking 50 TON in Pool X for ~8% APY
+	• TokenZ is trending up 20% this week - might be worth exploring
+	• Keep 20 TON liquid for opportunities
+	
+This strategy balances growth with security for your portfolio size."
+
+⸻
+
+7. 🧰 Enhanced Tech Stack
+
+### Existing Components (✅ Working):
 Component	Tool	Purpose
 Web Server	Express.js	Handle webhooks and HTTP requests
 HTTP Client	Axios	Call n8n webhook
-Telegram API	node-telegram-bot-api or fetch	Send/receive messages
-Hosting	Railway or Fly.io	Deployment platform
+Telegram API	Telegram Bot API	Send/receive messages
+Hosting	Railway	Deployment platform
+Rate Limiting	express-rate-limit	User throttling
+Logging	Winston	Request/error tracking
+
+### New Components (🆕 To Add):
+Component	Tool	Purpose
+Wallet Detection	crypto-regex	Identify wallet addresses
+TON Integration	ton-core, @orbs-network/ton-access	Fetch wallet data
+Address Validation	Built-in validators	Validate wallet formats
+Market Data	n8n + Perplexity API	Real-time sentiment analysis
 
 ⸻
 
-7. 📋 Error Handling
+8. 📋 Enhanced Error Handling
 
+### Existing Error Cases (✅ Working):
 Scenario	Response
 n8n webhook down	"I'm having trouble thinking right now, try again in a moment"
 Invalid Telegram format	Log error, no response to user
 Rate limit exceeded	"Please wait a moment before asking another question"
 Network timeout	"Request took too long, please try again"
 
+### New Error Cases (🆕 To Add):
+Scenario	Response
+Invalid wallet address	"That doesn't look like a valid TON wallet address. Please check and try again."
+TON API unavailable	"I can't access wallet data right now. Try again in a moment or ask a general crypto question."
+Empty wallet	"This wallet appears to be empty. Feel free to ask general crypto questions!"
+API rate limits	"Too many wallet lookups right now. Please try again in a few minutes."
+
 ⸻
 
-8. 🚀 Deployment Requirements
+9. 🚀 Enhanced Deployment Requirements
 
-Environment Setup:
+### Existing Setup (✅ Working):
 	•	Bot token from BotFather
 	•	n8n webhook URL (provided)
 	•	Public URL for Telegram webhook registration
 	•	Health check endpoint for uptime monitoring
 
-File Structure:
+### New Setup Requirements (🆕 To Add):
+	•	TON API access configuration
+	•	Enhanced n8n workflow with market sentiment
+	•	Optional Etherscan API key for Ethereum fallback
+	•	Additional error monitoring for wallet features
+
+### Existing File Structure (✅ Working):
 	•	index.js - Main server file
 	•	package.json - Dependencies
 	•	.env.example - Environment template
 	•	Dockerfile or Railway config
+	•	logger.js - Logging utility
+
+### New File Structure (🆕 To Add):
+	•	wallet-utils.js - Wallet detection and API calls
+	•	ton-api.js - TON blockchain integration
+	•	Updated .env.example - New environment variables
 
 ⸻
 
-9. 📈 Success Criteria
+10. 📈 Enhanced Success Criteria
 
+### Phase 1 Criteria (✅ COMPLETED):
 	•	✅ Bot responds to /start command
 	•	✅ User messages successfully reach n8n
 	•	✅ n8n responses return to correct Telegram user
 	•	✅ Error states handled gracefully
 	•	✅ Deployed and accessible via public URL
 	•	✅ <3 second response time for simple queries
+
+### Phase 2 Criteria (🆕 TO ACHIEVE):
+	•	🎯 Bot detects TON wallet addresses in messages
+	•	🎯 Wallet balance lookup completes in <5 seconds
+	•	🎯 Displays accurate token holdings and USD value
+	•	🎯 Handles invalid addresses gracefully
+	•	🎯 Falls back to educational responses when appropriate
+
+### Phase 3 Criteria (🆕 TO ACHIEVE):
+	•	🎯 Generates personalized investment strategies
+	•	🎯 Incorporates real-time market sentiment
+	•	🎯 Provides actionable, beginner-friendly advice
+	•	🎯 Maintains context throughout conversation
+	•	🎯 Complete demo flow works reliably for judges
+
+⸻
+
+11. 🥅 Hackathon Alignment
+
+### Track Compatibility:
+	•	**DeFi**: Wallet integration and investment strategies
+	•	**AI**: Powered by ChatGPT + Perplexity with smart context
+	•	**Telegram Social Agents**: Native Telegram interface with conversational UX
+
+### TON-Native Features:
+	•	Primary TON wallet integration
+	•	TON ecosystem token analysis
+	•	TON staking recommendations
+	•	On-chain data integration
+
+### Value Proposition:
+	•	**For Beginners**: Transforms complex crypto concepts into simple, actionable advice
+	•	**For TON Ecosystem**: Drives adoption through accessible AI guidance
+	•	**For Judges**: Complete working demo showcasing AI + DeFi + Social integration
 
 ⸻ 
