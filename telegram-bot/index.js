@@ -1,6 +1,8 @@
 const express = require('express');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
+const logger = require('./logger');
 require('dotenv').config();
 
 const app = express();
@@ -8,6 +10,41 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
+
+// Request logging middleware
+app.use((req, res, next) => {
+  // Skip logging health checks to reduce noise
+  if (req.path === '/health') return next();
+  
+  const start = Date.now();
+  const requestId = crypto.randomUUID();
+  
+  // Add requestId to request object for tracking through the request lifecycle
+  req.requestId = requestId;
+  
+  logger.info('Request received', {
+    requestId,
+    method: req.method,
+    path: req.path,
+    query: req.query,
+    ip: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+  
+  // Log when request completes
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logger.info('Request completed', {
+      requestId,
+      method: req.method,
+      path: req.path,
+      statusCode: res.statusCode,
+      duration: `${duration}ms`
+    });
+  });
+  
+  next();
+});
 
 // IP-based rate limiting (existing)
 const limiter = rateLimit({
@@ -74,7 +111,10 @@ setInterval(() => {
     }
   }
   if (cleanedCount > 0) {
-    console.log(`🧹 Cleaned up ${cleanedCount} expired user rate limit records`);
+    logger.info('Rate limit cleanup completed', { 
+      cleanedRecords: cleanedCount,
+      activeRecords: Object.keys(userRequests).length
+    });
   }
 }, 15 * 60 * 1000); // Run every 15 minutes
 
@@ -106,25 +146,37 @@ app.get('/setup', async (req, res) => {
     const webhookUrl = `${publicUrl}/webhook/telegram`;
     const url = `https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`;
     
-    console.log(`🔗 Setting webhook to: ${webhookUrl}`);
+    logger.info('Setting webhook', { webhookUrl, requestId: req.requestId });
     const response = await axios.get(url);
     
     if (response.data.ok) {
-      console.log('✅ Webhook registered successfully');
+      logger.info('Webhook registered successfully', { 
+        webhookUrl, 
+        telegramResponse: response.data,
+        requestId: req.requestId
+      });
       res.json({ 
         success: true, 
         webhook: webhookUrl,
         telegram_response: response.data 
       });
     } else {
-      console.log('❌ Failed to register webhook:', response.data);
+      logger.error('Failed to register webhook', { 
+        webhookUrl, 
+        telegramResponse: response.data,
+        requestId: req.requestId
+      });
       res.status(400).json({ 
         success: false, 
         error: response.data 
       });
     }
   } catch (error) {
-    console.error('Error setting up webhook:', error);
+    logger.error('Error setting up webhook', { 
+      error: error.message, 
+      stack: error.stack,
+      requestId: req.requestId
+    });
     res.status(500).json({ error: error.message });
   }
 });
@@ -132,11 +184,17 @@ app.get('/setup', async (req, res) => {
 // Telegram webhook endpoint
 app.post('/webhook/telegram', async (req, res) => {
   try {
-    console.log('Received Telegram webhook:', JSON.stringify(req.body, null, 2));
+    logger.debug('Telegram webhook received', { 
+      requestId: req.requestId,
+      bodySize: JSON.stringify(req.body).length 
+    });
     
     // Validate the incoming request has the expected structure
     if (!req.body || !req.body.message) {
-      console.error('Invalid request format:', req.body);
+      logger.warn('Invalid webhook request format', { 
+        requestId: req.requestId,
+        body: req.body 
+      });
       return res.status(400).send('Invalid request format');
     }
     
@@ -147,28 +205,41 @@ app.post('/webhook/telegram', async (req, res) => {
     const userId = message.from.id;
     const userName = message.from.first_name || message.from.username || 'User';
     
-    // Log incoming message
-    console.log(`📨 Message from ${userName} (${userId}): ${messageText}`);
+    // Log incoming message (without sensitive content)
+    logger.info('Message received from user', {
+      requestId: req.requestId,
+      userId,
+      userName,
+      chatId,
+      messageLength: messageText?.length || 0,
+      hasText: !!messageText
+    });
     
     // Acknowledge receipt to Telegram (important for webhook performance)
     res.status(200).send('OK');
     
     // Process message in a separate function
     // This allows us to respond to Telegram quickly while processing continues
-    processMessage(chatId, messageText, userId, userName);
+    processMessage(chatId, messageText, userId, userName, req.requestId);
   } catch (error) {
-    console.error('Error processing webhook:', error);
+    logger.error('Error processing webhook', { 
+      error: error.message, 
+      stack: error.stack,
+      requestId: req.requestId
+    });
     res.status(500).send('Internal server error');
   }
 });
 
 // Function to forward messages to n8n webhook
-async function forwardToN8n(message, userId) {
+async function forwardToN8n(message, userId, requestId) {
+  const startTime = Date.now();
+  
   try {
     const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL;
     
     if (!n8nWebhookUrl) {
-      console.error('N8N_WEBHOOK_URL not configured');
+      logger.error('N8N_WEBHOOK_URL not configured', { userId, requestId });
       return { 
         error: 'configuration', 
         message: "I'm not properly configured yet. Please check back soon!" 
@@ -180,11 +251,18 @@ async function forwardToN8n(message, userId) {
       message: message,
       userId: userId,
       source: 'telegram',
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      requestId: requestId
     };
     
     // Send request to n8n webhook
-    console.log(`🔄 Forwarding to n8n: "${message}"`);
+    logger.info('Forwarding to n8n', {
+      userId,
+      requestId,
+      messageLength: message.length,
+      n8nUrl: n8nWebhookUrl.replace(/\/[^\/]*$/, '/***') // Hide sensitive URL parts
+    });
+    
     const response = await axios.post(n8nWebhookUrl, payload, {
       headers: {
         'Content-Type': 'application/json'
@@ -192,7 +270,14 @@ async function forwardToN8n(message, userId) {
       timeout: 300000 // 5 minute timeout for AI processing
     });
     
-    console.log('✅ Received response from n8n:', JSON.stringify(response.data, null, 2));
+    const duration = Date.now() - startTime;
+    logger.info('n8n response received', {
+      userId,
+      requestId,
+      duration: `${duration}ms`,
+      status: response.status,
+      responseSize: JSON.stringify(response.data).length
+    });
     
     // Return the processed response from n8n
     // Handle different response formats
@@ -210,38 +295,81 @@ async function forwardToN8n(message, userId) {
     }
     
   } catch (error) {
-    console.error('Error forwarding to n8n:', error.message);
+    const duration = Date.now() - startTime;
     
-    // Return appropriate error messages based on error type
+    logger.error('Error forwarding to n8n', { 
+      error: error.message,
+      stack: error.stack,
+      userId,
+      requestId,
+      duration: `${duration}ms`,
+      messageLength: message.length,
+      errorCode: error.code,
+      responseStatus: error.response?.status,
+      responseData: error.response?.data
+    });
+    
+    // Enhanced error classification with logging
     if (error.code === 'ECONNABORTED') {
+      logger.warn('n8n request timeout', { userId, requestId, duration: `${duration}ms` });
       return { 
         error: 'timeout', 
         message: 'Request took too long, please try again' 
       };
-    } else if (error.response && error.response.status >= 500) {
-      return { 
-        error: 'n8n_down', 
-        message: "I'm having trouble thinking right now, try again in a moment" 
-      };
     } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+      logger.error('n8n connection failed', { 
+        userId, 
+        requestId, 
+        errorCode: error.code,
+        hostname: error.hostname
+      });
       return { 
         error: 'connection', 
         message: "I can't reach my AI brain right now. Please try again later." 
       };
-    } else {
-      return { 
-        error: 'unknown', 
-        message: 'An error occurred processing your request. Please try again.' 
-      };
+    } else if (error.response) {
+      const status = error.response.status;
+      logger.error('n8n error response', { 
+        userId,
+        requestId,
+        status,
+        statusText: error.response.statusText,
+        responseData: error.response.data
+      });
+      
+      if (status >= 500) {
+        return { 
+          error: 'n8n_error', 
+          message: "I'm having trouble thinking right now, try again in a moment" 
+        };
+      } else if (status === 429) {
+        return { 
+          error: 'n8n_rate_limited', 
+          message: "I'm receiving too many requests right now, please try again later" 
+        };
+      } else if (status === 400) {
+        return { 
+          error: 'invalid_request', 
+          message: "I couldn't process that request properly" 
+        };
+      }
     }
+    
+    return { 
+      error: 'unknown', 
+      message: 'An error occurred processing your request. Please try again.' 
+    };
   }
 }
 
 // Updated message processing function with n8n integration
-async function processMessage(chatId, messageText, userId, userName) {
+async function processMessage(chatId, messageText, userId, userName, requestId) {
+  const processingStartTime = Date.now();
+  
   try {
     // Handle /start command (skip rate limiting for this)
     if (messageText === '/start') {
+      logger.info('Start command received', { userId, userName, requestId });
       await sendTelegramMessage(chatId, 
         `🤖 Hello ${userName}! I'm TONNY, your crypto strategy assistant.\n\n` +
         `Ask me anything about crypto markets, DeFi, or investment strategies!\n\n` +
@@ -253,14 +381,25 @@ async function processMessage(chatId, messageText, userId, userName) {
     // Check user-specific rate limit for all other messages
     const rateLimitCheck = checkUserRateLimit(userId);
     if (rateLimitCheck.limited) {
-      console.log(`⏱️ Rate limit exceeded for user ${userId} (${userName})`);
+      logger.warn('Rate limit exceeded', { 
+        userId, 
+        userName, 
+        requestId,
+        resetAt: new Date(rateLimitCheck.resetAt).toISOString()
+      });
       await sendTelegramMessage(chatId, rateLimitCheck.message);
       return;
     }
     
     // Forward message to n8n and get AI response
-    console.log(`🧠 Processing "${messageText}" for user ${userName} (${userId})`);
-    const n8nResponse = await forwardToN8n(messageText, userId);
+    logger.info('Processing message', {
+      userId,
+      userName,
+      requestId,
+      messageLength: messageText.length
+    });
+    
+    const n8nResponse = await forwardToN8n(messageText, userId, requestId);
     
     // Extract message from response
     let responseMessage;
@@ -275,8 +414,26 @@ async function processMessage(chatId, messageText, userId, userName) {
     // Send response back to user
     await sendTelegramMessage(chatId, responseMessage);
     
+    const totalDuration = Date.now() - processingStartTime;
+    logger.info('Message processing completed', {
+      userId,
+      userName,
+      requestId,
+      totalDuration: `${totalDuration}ms`,
+      responseLength: responseMessage.length
+    });
+    
   } catch (error) {
-    console.error('Error in processMessage:', error);
+    const totalDuration = Date.now() - processingStartTime;
+    logger.error('Error in processMessage', { 
+      error: error.message,
+      stack: error.stack,
+      userId,
+      userName,
+      requestId,
+      totalDuration: `${totalDuration}ms`
+    });
+    
     await sendTelegramMessage(chatId, 
       "Sorry, I encountered an error processing your request. Please try again in a moment."
     );
@@ -298,17 +455,27 @@ async function sendSingleTelegramMessage(chatId, text) {
     
     // Send message to Telegram
     const response = await axios.post(url, payload);
-    console.log(`✅ Message sent to ${chatId}`);
+    logger.info('Telegram message sent', { 
+      chatId, 
+      messageLength: text.length,
+      parseMode: 'Markdown'
+    });
     return response.data;
   } catch (error) {
-    console.error('Error sending Telegram message:', error.response?.data || error.message);
+    logger.error('Error sending Telegram message', { 
+      chatId,
+      error: error.message,
+      responseStatus: error.response?.status,
+      responseData: error.response?.data,
+      messageLength: text.length
+    });
     
     // If markdown parsing fails, try sending without markdown
     if (error.response && 
         error.response.status === 400 && 
         error.response.data.description && 
         error.response.data.description.includes('parse')) {
-      console.log(`🔄 Markdown parsing failed, retrying with plain text for chat ${chatId}`);
+      logger.warn('Markdown parsing failed, retrying with plain text', { chatId });
       return await sendSingleTelegramMessagePlainText(chatId, text);
     }
     
@@ -330,10 +497,19 @@ async function sendSingleTelegramMessagePlainText(chatId, text) {
     };
     
     const response = await axios.post(url, payload);
-    console.log(`✅ Plain text message sent to ${chatId}`);
+    logger.info('Telegram plain text message sent', { 
+      chatId, 
+      messageLength: text.length 
+    });
     return response.data;
   } catch (error) {
-    console.error('Error sending plain text message:', error.response?.data || error.message);
+    logger.error('Error sending plain text message', { 
+      chatId,
+      error: error.message,
+      responseStatus: error.response?.status,
+      responseData: error.response?.data,
+      messageLength: text.length
+    });
     throw error;
   }
 }
@@ -343,17 +519,61 @@ async function sendTelegramMessage(chatId, text) {
   return await sendSingleTelegramMessage(chatId, text);
 }
 
+// Global error handlers
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception', { 
+    error: error.message, 
+    stack: error.stack 
+  });
+  // Don't exit in development, but log the error
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1);
+  }
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled promise rejection', { 
+    reason: reason instanceof Error ? reason.message : reason,
+    stack: reason instanceof Error ? reason.stack : undefined,
+    promise: promise.toString()
+  });
+});
+
+// Express error handler (should be last middleware)
+app.use((err, req, res, next) => {
+  logger.error('Express error', { 
+    error: err.message, 
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+    requestId: req.requestId
+  });
+  res.status(500).send('Internal server error');
+});
+
 // Start server
 const server = app.listen(PORT, () => {
-  console.log(`🤖 TON AI Telegram Bot Bridge running on port ${PORT}`);
-  console.log(`📋 Health check: http://localhost:${PORT}/health`);
-  console.log(`📞 Webhook endpoint: http://localhost:${PORT}/webhook/telegram`);
+  logger.info('Server started', {
+    port: PORT,
+    environment: process.env.NODE_ENV || 'development',
+    healthCheck: `http://localhost:${PORT}/health`,
+    webhookEndpoint: `http://localhost:${PORT}/webhook/telegram`
+  });
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
+  logger.info('SIGTERM signal received: closing HTTP server');
   server.close(() => {
-    console.log('HTTP server closed');
+    logger.info('HTTP server closed gracefully');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  logger.info('SIGINT signal received: closing HTTP server');
+  server.close(() => {
+    logger.info('HTTP server closed gracefully');
+    process.exit(0);
   });
 }); 
