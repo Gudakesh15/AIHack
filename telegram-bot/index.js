@@ -4,7 +4,24 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const logger = require('./logger');
 const { detectWalletAddress, getWalletData, formatWalletResponse, formatWalletResponseWithStrategyCTA } = require('./wallet-utils');
+const VapiIntegration = require('./voice-integration');
 require('dotenv').config();
+
+// Initialize Vapi integration
+const vapiIntegration = new VapiIntegration();
+
+// Check Vapi configuration at startup
+if (vapiIntegration.isConfigured()) {
+  logger.info('Vapi integration configured successfully', {
+    hasAssistantId: !!process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID,
+    hasPrivateKey: !!process.env.VAPI_PRIVATE_KEY
+  });
+} else {
+  logger.warn('Vapi integration not fully configured - voice calls will not work', {
+    hasAssistantId: !!process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID,
+    hasPrivateKey: !!process.env.VAPI_PRIVATE_KEY
+  });
+}
 
 // User state management for context-aware responses
 const userStates = new Map();
@@ -17,6 +34,20 @@ function detectIntent(messageText) {
   const walletDetected = detectWalletAddress(messageText);
   if (walletDetected) {
     return { type: 'wallet', data: walletDetected };
+  }
+  
+  // Remove phone number detection since we're using web calls now
+  
+  // Check for voice call requests
+  const voiceRequests = ['call me', 'voice call', 'phone call', 'talk to me', 'speak with me', 'voice chat'];
+  if (voiceRequests.some(phrase => text.includes(phrase))) {
+    return { type: 'voice_request', data: text };
+  }
+
+  // Check for voice troubleshooting requests
+  const voiceTroublehooting = ['voice not working', 'call not working', 'mobile voice', 'phone voice issue', 'voice help'];
+  if (voiceTroublehooting.some(phrase => text.includes(phrase))) {
+    return { type: 'voice_troubleshooting', data: text };
   }
   
   // Check for affirmative responses
@@ -34,6 +65,8 @@ function detectIntent(messageText) {
   // Default to basic question
   return { type: 'basic_question', data: text };
 }
+
+// Phone number detection function removed - using web calls instead
 
 function getUserState(userId) {
   return userStates.get(userId) || { context: null, lastWalletData: null, timestamp: null };
@@ -140,8 +173,9 @@ async function forwardToBasic(message, userId, requestId) {
       responseText = 'I processed your question but got an unexpected response format.';
     }
     
-    // Add CTA to connect wallet
-    responseText += '\n\n💡 **Want personalized advice?**\nShare your wallet address and I can analyze your holdings for tailored strategies!';
+    // Add CTA to connect wallet AND voice call option
+    responseText += '\n\n💡 **Want personalized advice?**\nShare your wallet address and I can analyze your holdings for tailored strategies!' +
+                   '\n\n🎙️ **Prefer to talk it through?**\nType "call me" for a voice conversation in your browser!';
     
     return responseText;
     
@@ -381,10 +415,21 @@ setInterval(() => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
+  const vapiConfigured = !!(process.env.VAPI_PRIVATE_KEY);
+  
   res.status(200).json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    service: 'TON AI Telegram Bot Bridge'
+    service: 'TON AI Telegram Bot Bridge',
+    features: {
+      textChat: true,
+      walletAnalysis: !!(process.env.N8N_BASIC_WEBHOOK_URL && process.env.N8N_STRATEGY_WEBHOOK_URL),
+      voiceCalls: vapiConfigured
+    },
+    endpoints: {
+      telegram: '/webhook/telegram',
+      vapi: vapiConfigured ? '/webhook/vapi' : 'not_configured'
+    }
   });
 });
 
@@ -484,6 +529,56 @@ app.post('/webhook/telegram', async (req, res) => {
     processMessage(chatId, messageText, userId, userName, req.requestId);
   } catch (error) {
     logger.error('Error processing webhook', { 
+      error: error.message, 
+      stack: error.stack,
+      requestId: req.requestId
+    });
+    res.status(500).send('Internal server error');
+  }
+});
+
+// Vapi webhook endpoint for voice call events
+app.post('/webhook/vapi', async (req, res) => {
+  try {
+    logger.debug('Vapi webhook received', { 
+      requestId: req.requestId,
+      bodySize: JSON.stringify(req.body).length,
+      eventType: req.body.message?.type
+    });
+    
+    // Acknowledge receipt to Vapi
+    res.status(200).send('OK');
+    
+    // Process Vapi webhook event
+    const event = vapiIntegration.handleWebhookEvent(req.body);
+    
+    if (event) {
+      logger.info('Vapi webhook event processed', {
+        requestId: req.requestId,
+        eventType: event.type,
+        callId: event.callId
+      });
+      
+      // Handle call-ended events to send summary back to Telegram
+      if (event.type === 'call-ended' && event.metadata?.userId) {
+        const userId = event.metadata.userId;
+        
+        // Find user's chat ID (you might want to store this mapping)
+        // For now, we'll just log the event
+        logger.info('Voice call ended for user', {
+          userId,
+          duration: event.duration,
+          endedReason: event.endedReason,
+          hasSummary: !!event.summary
+        });
+        
+        // TODO: Send call summary back to user's Telegram chat
+        // This would require storing userId -> chatId mapping
+      }
+    }
+    
+  } catch (error) {
+    logger.error('Error processing Vapi webhook', { 
       error: error.message, 
       stack: error.stack,
       requestId: req.requestId
@@ -747,6 +842,74 @@ async function processMessage(chatId, messageText, userId, userName, requestId) 
           const basicResponse = await forwardToBasic(messageText, userId, requestId);
           responseMessage = typeof basicResponse === 'object' ? basicResponse.message : basicResponse;
         }
+        break;
+        
+      // Removed phone case - using web calls instead
+        
+      case 'voice_request':
+        // Handle voice call requests - create web call
+        logger.info('Voice call requested - creating web call', {
+          userId,
+          userName,
+          requestId,
+          hasWalletData: !!userState.lastWalletData
+        });
+        
+        try {
+          // Send immediate response
+          await sendTelegramMessage(chatId, 
+            '🎙️ **Setting up your voice call...**\n\n' +
+            '⏱️ Creating your personalized AI strategist session...'
+          );
+          
+          // Get conversation context
+          let conversationContext = 'User requested voice consultation for crypto advice and strategy discussion.';
+          
+          if (userState.lastWalletData) {
+            conversationContext = `User has ${userState.lastWalletData.balanceTON} TON in their wallet (${userState.lastWalletData.type}). Previous conversation about crypto strategy and portfolio analysis. User wants to discuss their holdings and get investment advice.`;
+          }
+          
+          // Create web call session
+          const webCall = await vapiIntegration.createWebCall(userId, conversationContext);
+          
+          // Format the response message with the web call link
+          responseMessage = vapiIntegration.formatWebCallMessage(webCall.webCallUrl, conversationContext);
+          
+          logger.info('Web call created successfully', {
+            userId,
+            requestId,
+            callId: webCall.callId,
+            hasContext: !!conversationContext
+          });
+          
+        } catch (error) {
+          logger.error('Error creating web call', {
+            userId,
+            requestId,
+            error: error.message
+          });
+          
+          responseMessage = '❌ **Voice Call Setup Failed**\n\n' +
+            'I encountered an error setting up your voice call. This might be due to:\n' +
+            '• Vapi API configuration issues\n' +
+            '• Temporary service unavailability\n\n' +
+            'Please try again in a moment, or ask me any text-based crypto questions!';
+        }
+        
+        // Clear user state after processing
+        clearUserState(userId);
+        break;
+
+      case 'voice_troubleshooting':
+        // Handle voice troubleshooting requests
+        logger.info('Voice troubleshooting requested', {
+          userId,
+          userName,
+          requestId
+        });
+
+        responseMessage = vapiIntegration.formatMobileTroubleshootingMessage();
+        clearUserState(userId);
         break;
         
       case 'negative':
