@@ -196,11 +196,46 @@ function isValidWalletAddress(address, type) {
   }
 }
 
+/**
+ * Format wallet data for user-friendly display with strategy CTA
+ * @param {object} walletData - Data from getWalletData
+ * @param {string} type - Wallet type
+ * @returns {string} - Formatted message for Telegram with strategy CTA
+ */
+function formatWalletResponseWithStrategyCTA(walletData, type) {
+  if (!walletData.success) {
+    return `❌ Sorry, I couldn't fetch your ${type} wallet data. ${walletData.error || 'Please try again later.'}`;
+  }
+  
+  if (type === 'TON') {
+    const balance = walletData.balanceTON.toFixed(2);
+    
+    if (walletData.balanceTON === 0) {
+      return `💳 **Your TON Wallet Analysis:**\n\n` +
+             `💰 Balance: **0 TON** (Empty wallet)\n\n` +
+             `💡 **Want personalized investment strategies?**\n` +
+             `Even with an empty wallet, I can suggest the best entry points and DeFi opportunities.\n\n` +
+             `**Just type "yes" to get tailored investment advice!**`;
+    }
+    
+    return `💳 **Your TON Wallet Analysis:**\n\n` +
+           `💰 Balance: **${balance} TON**\n` +
+           `${walletData.tokens && walletData.tokens.length > 0 ? `🪙 Tokens: ${walletData.tokens.length} different tokens\n` : ''}` +
+           `\n🚀 **Ready for a personalized investment strategy?**\n` +
+           `I can analyze current market trends and suggest optimal moves for your ${balance} TON.\n\n` +
+           `**Type "yes" to get your custom strategy, or "no" if you just want general crypto advice.**`;
+  }
+  
+  return `📱 ${type} wallet detected, but this feature is coming soon!\n\n` +
+         `**Type "yes" if you'd like strategy advice anyway, or ask me any crypto question!**`;
+}
+
 module.exports = {
   detectWalletAddress,
   getTonWalletData,
   getEthWalletData,
   getWalletData,
   formatWalletResponse,
+  formatWalletResponseWithStrategyCTA,
   isValidWalletAddress
 }; 

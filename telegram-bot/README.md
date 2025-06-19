@@ -38,8 +38,16 @@ Edit `.env` file with your values:
 
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_from_botfather
+
+# Intent-based routing endpoints
+N8N_BASIC_WEBHOOK_URL=https://your-n8n-instance.com/webhook/basic-questions
+N8N_STRATEGY_WEBHOOK_URL=https://your-n8n-instance.com/webhook/strategy-analysis
+
+# Legacy endpoint (optional)
 N8N_WEBHOOK_URL=https://your-n8n-instance.com/webhook/telegram-bot
+
 PORT=3000
+PUBLIC_URL=https://your-app-url.com
 ```
 
 ## 📡 Endpoints

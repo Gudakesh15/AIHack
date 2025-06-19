@@ -3,8 +3,268 @@ const axios = require('axios');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const logger = require('./logger');
-const { detectWalletAddress, getWalletData, formatWalletResponse } = require('./wallet-utils');
+const { detectWalletAddress, getWalletData, formatWalletResponse, formatWalletResponseWithStrategyCTA } = require('./wallet-utils');
 require('dotenv').config();
+
+// User state management for context-aware responses
+const userStates = new Map();
+
+// Intent detection functions
+function detectIntent(messageText) {
+  const text = messageText.toLowerCase().trim();
+  
+  // Check for wallet address first (highest priority)
+  const walletDetected = detectWalletAddress(messageText);
+  if (walletDetected) {
+    return { type: 'wallet', data: walletDetected };
+  }
+  
+  // Check for affirmative responses
+  const affirmativeResponses = ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'y', '👍', 'go ahead', 'proceed'];
+  if (affirmativeResponses.includes(text)) {
+    return { type: 'affirmative', data: text };
+  }
+  
+  // Check for negative responses
+  const negativeResponses = ['no', 'nope', 'nah', 'not now', 'later', 'n', '👎', 'skip'];
+  if (negativeResponses.includes(text)) {
+    return { type: 'negative', data: text };
+  }
+  
+  // Default to basic question
+  return { type: 'basic_question', data: text };
+}
+
+function getUserState(userId) {
+  return userStates.get(userId) || { context: null, lastWalletData: null, timestamp: null };
+}
+
+function setUserState(userId, context, data = null) {
+  userStates.set(userId, {
+    context: context,
+    lastWalletData: data,
+    timestamp: Date.now()
+  });
+  
+  // Clean up old states (older than 10 minutes)
+  setTimeout(() => {
+    const state = userStates.get(userId);
+    if (state && Date.now() - state.timestamp > 600000) { // 10 minutes
+      userStates.delete(userId);
+      logger.debug('User state cleaned up', { userId });
+    }
+  }, 600000);
+}
+
+function clearUserState(userId) {
+  userStates.delete(userId);
+}
+
+// API routing functions
+async function forwardToBasic(message, userId, requestId) {
+  const startTime = Date.now();
+  
+  try {
+    const basicWebhookUrl = process.env.N8N_BASIC_WEBHOOK_URL;
+    
+    if (!basicWebhookUrl) {
+      logger.error('N8N_BASIC_WEBHOOK_URL not configured', { userId, requestId });
+      return { 
+        error: 'configuration', 
+        message: "Basic questions service is not properly configured. Please check back soon!" 
+      };
+    }
+    
+    const payload = {
+      message: message,
+      userId: userId,
+      source: 'telegram',
+      intent: 'basic_question',
+      timestamp: new Date().toISOString(),
+      requestId: requestId
+    };
+    
+    logger.info('Forwarding to basic n8n endpoint', {
+      userId,
+      requestId,
+      messageLength: message.length,
+      basicUrl: basicWebhookUrl.replace(/\/[^\/]*$/, '/***')
+    });
+    
+    const response = await axios.post(basicWebhookUrl, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 120000 // 2 minute timeout for basic questions
+    });
+    
+    const duration = Date.now() - startTime;
+    logger.info('Basic n8n response received', {
+      userId,
+      requestId,
+      duration: `${duration}ms`,
+      status: response.status,
+      responseData: JSON.stringify(response.data, null, 2), // Debug: full response
+      responseType: typeof response.data,
+      responseKeys: typeof response.data === 'object' ? Object.keys(response.data) : 'not_object'
+    });
+    
+    // Parse response and add CTA
+    let responseText = '';
+    if (response.data && typeof response.data === 'object') {
+      // Handle n8n structured output format: {"results": [{"toolCallId": "...", "result": "..."}]}
+      if (response.data.results && Array.isArray(response.data.results) && response.data.results.length > 0) {
+        responseText = response.data.results[0].result;
+      }
+      // Handle direct n8n webhook response with output field
+      else if (response.data.output) {
+        responseText = response.data.output;
+      }
+      // Handle other common response formats
+      else if (response.data.message) {
+        responseText = response.data.message;
+      }
+      else if (response.data.response) {
+        responseText = response.data.response;
+      }
+      // If it's a simple object with one string value, use that
+      else {
+        const values = Object.values(response.data).filter(v => typeof v === 'string' && v.length > 10);
+        if (values.length > 0) {
+          responseText = values[0];
+        } else {
+          responseText = JSON.stringify(response.data);
+        }
+      }
+    } else if (typeof response.data === 'string') {
+      responseText = response.data;
+    } else {
+      responseText = 'I processed your question but got an unexpected response format.';
+    }
+    
+    // Add CTA to connect wallet
+    responseText += '\n\n💡 **Want personalized advice?**\nShare your wallet address and I can analyze your holdings for tailored strategies!';
+    
+    return responseText;
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    logger.error('Error forwarding to basic endpoint', {
+      error: error.message,
+      stack: error.stack,
+      userId,
+      requestId,
+      duration: `${duration}ms`
+    });
+    
+    return { 
+      error: 'basic_api_error', 
+      message: 'Sorry, I had trouble processing your question. Please try again in a moment.' 
+    };
+  }
+}
+
+async function forwardToStrategy(message, userId, walletData, requestId) {
+  const startTime = Date.now();
+  
+  try {
+    const strategyWebhookUrl = process.env.N8N_STRATEGY_WEBHOOK_URL;
+    
+    if (!strategyWebhookUrl) {
+      logger.error('N8N_STRATEGY_WEBHOOK_URL not configured', { userId, requestId });
+      return { 
+        error: 'configuration', 
+        message: "Strategy service is not properly configured. Please check back soon!" 
+      };
+    }
+    
+    const payload = {
+      message: message,
+      userId: userId,
+      source: 'telegram',
+      intent: 'strategy_request',
+      walletData: {
+        type: walletData.type,
+        balance: walletData.balance,
+        balanceTON: walletData.balanceTON,
+        currency: walletData.currency,
+        address_preview: walletData.address?.substring(0, 8) + '...' // Don't send full address
+      },
+      timestamp: new Date().toISOString(),
+      requestId: requestId
+    };
+    
+    logger.info('Forwarding to strategy n8n endpoint', {
+      userId,
+      requestId,
+      messageLength: message.length,
+      walletType: walletData.type,
+      balance: walletData.balanceTON,
+      strategyUrl: strategyWebhookUrl.replace(/\/[^\/]*$/, '/***')
+    });
+    
+    const response = await axios.post(strategyWebhookUrl, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 300000 // 5 minute timeout for strategy analysis
+    });
+    
+    const duration = Date.now() - startTime;
+    logger.info('Strategy n8n response received', {
+      userId,
+      requestId,
+      duration: `${duration}ms`,
+      status: response.status,
+      responseData: JSON.stringify(response.data, null, 2), // Debug: full response
+      responseType: typeof response.data,
+      responseKeys: typeof response.data === 'object' ? Object.keys(response.data) : 'not_object'
+    });
+    
+    // Parse response (same logic as basic endpoint)
+    if (response.data && typeof response.data === 'object') {
+      // Handle n8n structured output format: {"results": [{"toolCallId": "...", "result": "..."}]}
+      if (response.data.results && Array.isArray(response.data.results) && response.data.results.length > 0) {
+        return response.data.results[0].result;
+      }
+      // Handle direct n8n webhook response with output field
+      else if (response.data.output) {
+        return response.data.output;
+      }
+      // Handle other common response formats
+      else if (response.data.message) {
+        return response.data.message;
+      }
+      else if (response.data.response) {
+        return response.data.response;
+      }
+      // If it's a simple object with one string value, use that
+      else {
+        const values = Object.values(response.data).filter(v => typeof v === 'string' && v.length > 10);
+        if (values.length > 0) {
+          return values[0];
+        } else {
+          return JSON.stringify(response.data);
+        }
+      }
+    } else if (typeof response.data === 'string') {
+      return response.data;
+    } else {
+      return 'I analyzed your wallet but got an unexpected response format. Please try again.';
+    }
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    logger.error('Error forwarding to strategy endpoint', {
+      error: error.message,
+      stack: error.stack,
+      userId,
+      requestId,
+      duration: `${duration}ms`
+    });
+    
+    return { 
+      error: 'strategy_api_error', 
+      message: 'Sorry, I had trouble analyzing your strategy. Please try again in a moment.' 
+    };
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -232,138 +492,7 @@ app.post('/webhook/telegram', async (req, res) => {
   }
 });
 
-// Function to forward messages to n8n webhook
-async function forwardToN8n(message, userId, requestId) {
-  const startTime = Date.now();
-  
-  try {
-    const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL;
-    
-    if (!n8nWebhookUrl) {
-      logger.error('N8N_WEBHOOK_URL not configured', { userId, requestId });
-      return { 
-        error: 'configuration', 
-        message: "I'm not properly configured yet. Please check back soon!" 
-      };
-    }
-    
-    // Prepare the payload for n8n
-    const payload = {
-      message: message,
-      userId: userId,
-      source: 'telegram',
-      timestamp: new Date().toISOString(),
-      requestId: requestId
-    };
-    
-    // Send request to n8n webhook
-    logger.info('Forwarding to n8n', {
-      userId,
-      requestId,
-      messageLength: message.length,
-      n8nUrl: n8nWebhookUrl.replace(/\/[^\/]*$/, '/***') // Hide sensitive URL parts
-    });
-    
-    const response = await axios.post(n8nWebhookUrl, payload, {
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      timeout: 300000 // 5 minute timeout for AI processing
-    });
-    
-    const duration = Date.now() - startTime;
-    logger.info('n8n response received', {
-      userId,
-      requestId,
-      duration: `${duration}ms`,
-      status: response.status,
-      responseSize: JSON.stringify(response.data).length
-    });
-    
-    // Return the processed response from n8n
-    // Handle different response formats
-    if (response.data && typeof response.data === 'object') {
-      // Handle n8n structured output format: {"results": [{"toolCallId": "...", "result": "..."}]}
-      if (response.data.results && Array.isArray(response.data.results) && response.data.results.length > 0) {
-        return response.data.results[0].result;
-      }
-      // Handle other common formats
-      return response.data.message || response.data.response || response.data;
-    } else if (typeof response.data === 'string') {
-      return response.data;
-    } else {
-      return response.data;
-    }
-    
-  } catch (error) {
-    const duration = Date.now() - startTime;
-    
-    logger.error('Error forwarding to n8n', { 
-      error: error.message,
-      stack: error.stack,
-      userId,
-      requestId,
-      duration: `${duration}ms`,
-      messageLength: message.length,
-      errorCode: error.code,
-      responseStatus: error.response?.status,
-      responseData: error.response?.data
-    });
-    
-    // Enhanced error classification with logging
-    if (error.code === 'ECONNABORTED') {
-      logger.warn('n8n request timeout', { userId, requestId, duration: `${duration}ms` });
-      return { 
-        error: 'timeout', 
-        message: 'Request took too long, please try again' 
-      };
-    } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-      logger.error('n8n connection failed', { 
-        userId, 
-        requestId, 
-        errorCode: error.code,
-        hostname: error.hostname
-      });
-      return { 
-        error: 'connection', 
-        message: "I can't reach my AI brain right now. Please try again later." 
-      };
-    } else if (error.response) {
-      const status = error.response.status;
-      logger.error('n8n error response', { 
-        userId,
-        requestId,
-        status,
-        statusText: error.response.statusText,
-        responseData: error.response.data
-      });
-      
-      if (status >= 500) {
-        return { 
-          error: 'n8n_error', 
-          message: "I'm having trouble thinking right now, try again in a moment" 
-        };
-      } else if (status === 429) {
-        return { 
-          error: 'n8n_rate_limited', 
-          message: "I'm receiving too many requests right now, please try again later" 
-        };
-      } else if (status === 400) {
-        return { 
-          error: 'invalid_request', 
-          message: "I couldn't process that request properly" 
-        };
-      }
-    }
-    
-    return { 
-      error: 'unknown', 
-      message: 'An error occurred processing your request. Please try again.' 
-    };
-  }
-}
-
-// Updated message processing function with n8n integration
+// Updated message processing function with intent-based routing
 async function processMessage(chatId, messageText, userId, userName, requestId) {
   const processingStartTime = Date.now();
   
@@ -371,6 +500,7 @@ async function processMessage(chatId, messageText, userId, userName, requestId) 
     // Handle /start command (skip rate limiting for this)
     if (messageText === '/start') {
       logger.info('Start command received', { userId, userName, requestId });
+      clearUserState(userId); // Clear any previous state
       await sendTelegramMessage(chatId, 
         `🤖 Hello ${userName}! I'm TONNY, your crypto strategy assistant.\n\n` +
         `Ask me anything about crypto markets, DeFi, or investment strategies!\n\n` +
@@ -392,73 +522,262 @@ async function processMessage(chatId, messageText, userId, userName, requestId) 
       return;
     }
     
-    // Check if message contains a wallet address
-    const walletDetected = detectWalletAddress(messageText);
+    // Detect message intent
+    const intent = detectIntent(messageText);
+    const userState = getUserState(userId);
     
-    if (walletDetected) {
-      // Handle wallet address - fetch data directly and respond
-      logger.info('Wallet address detected, processing directly', {
-        userId,
-        userName,
-        requestId,
-        walletType: walletDetected.type,
-        addressPreview: walletDetected.address.substring(0, 8) + '...'
-      });
-      
-      try {
-        // Fetch wallet data
-        const walletData = await getWalletData(walletDetected.address, walletDetected.type);
-        
-        // Format and send response
-        const walletResponse = formatWalletResponse(walletData, walletDetected.type);
-        await sendTelegramMessage(chatId, walletResponse);
-        
-        const totalDuration = Date.now() - processingStartTime;
-        logger.info('Wallet processing completed', {
+    logger.info('Intent detected', {
+      userId,
+      userName,
+      requestId,
+      intentType: intent.type,
+      userContext: userState.context,
+      messageLength: messageText.length
+    });
+    
+    let responseMessage = '';
+    
+    // Route based on intent and user state
+    switch (intent.type) {
+      case 'wallet':
+        // Handle wallet address - fetch data and set state for strategy CTA
+        const walletDetected = intent.data;
+        logger.info('Wallet address detected, processing directly', {
           userId,
           userName,
           requestId,
           walletType: walletDetected.type,
-          success: walletData.success,
-          totalDuration: `${totalDuration}ms`
+          addressPreview: walletDetected.address.substring(0, 8) + '...'
         });
         
-        return; // Don't forward to n8n for wallet addresses
-      } catch (walletError) {
-        logger.error('Error processing wallet', {
+        try {
+          // Fetch wallet data
+          const walletData = await getWalletData(walletDetected.address, walletDetected.type);
+          walletData.address = walletDetected.address; // Store full address for strategy calls
+          
+          if (walletData.success) {
+            // Set user state for potential strategy request
+            setUserState(userId, 'awaiting_strategy_confirmation', walletData);
+            
+            // Format wallet response with strategy CTA
+            responseMessage = formatWalletResponseWithStrategyCTA(walletData, walletDetected.type);
+          } else {
+            // Clear state on error
+            clearUserState(userId);
+            responseMessage = formatWalletResponse(walletData, walletDetected.type);
+          }
+          
+        } catch (walletError) {
+          logger.error('Error processing wallet', {
+            userId,
+            requestId,
+            walletType: walletDetected.type,
+            error: walletError.message
+          });
+          
+          clearUserState(userId);
+          responseMessage = `❌ I detected a ${walletDetected.type} wallet address but couldn't process it right now. Please try again or ask me a general crypto question!`;
+        }
+        break;
+        
+      case 'affirmative':
+        // Handle "yes" responses based on user context
+        if (userState.context === 'awaiting_strategy_confirmation' && userState.lastWalletData) {
+          logger.info('User confirmed strategy request', {
+            userId,
+            userName,
+            requestId,
+            walletType: userState.lastWalletData.type,
+            balance: userState.lastWalletData.balanceTON
+          });
+          
+          // Send immediate response
+          await sendTelegramMessage(chatId, 
+            '🔄 **Analyzing your portfolio and market conditions...**\n\n' +
+            '⏱️ This usually takes 30-60 seconds. I\'m gathering the latest market data to create your personalized strategy!'
+          );
+          
+          // Set up progress timers
+          const timers = [];
+          
+          // 30 second update - "fast response"
+          timers.push(setTimeout(async () => {
+            try {
+              await sendTelegramMessage(chatId, 
+                '⚡ **Still analyzing...** (30s)\n\n' +
+                'Good news! I\'m finding some great opportunities. Almost ready with your strategy! 📊'
+              );
+            } catch (error) {
+              logger.error('Error sending 30s update', { userId, error: error.message });
+            }
+          }, 30000));
+          
+          // 1 minute update - "normal response time"
+          timers.push(setTimeout(async () => {
+            try {
+              await sendTelegramMessage(chatId, 
+                '⏳ **Deep analysis in progress...** (1 min)\n\n' +
+                'I\'m running advanced market analysis to ensure your strategy is perfect. This is normal for thorough research! 🧠'
+              );
+            } catch (error) {
+              logger.error('Error sending 1min update', { userId, error: error.message });
+            }
+          }, 60000));
+          
+          // 2 minute update
+          timers.push(setTimeout(async () => {
+            try {
+              await sendTelegramMessage(chatId, 
+                '🔍 **Comprehensive analysis ongoing...** (2 min)\n\n' +
+                'I\'m cross-referencing multiple data sources to give you the most accurate strategy. Hang tight! 📈'
+              );
+            } catch (error) {
+              logger.error('Error sending 2min update', { userId, error: error.message });
+            }
+          }, 120000));
+          
+          // 5 minute warning - "something might be wrong"
+          timers.push(setTimeout(async () => {
+            try {
+              await sendTelegramMessage(chatId, 
+                '⚠️ **This is taking longer than expected...** (5 min)\n\n' +
+                'I\'m still working on your strategy, but this is unusual. The analysis might be extra complex, or there could be a technical issue. 🔧'
+              );
+            } catch (error) {
+              logger.error('Error sending 5min warning', { userId, error: error.message });
+            }
+          }, 300000));
+          
+          try {
+            // Forward to strategy endpoint with wallet data
+            const strategyPrompt = `Create a personalized investment strategy for a user with ${userState.lastWalletData.balanceTON} ${userState.lastWalletData.currency}. ` +
+              `Research and analyze the following to provide comprehensive recommendations:\n\n` +
+              `📊 MARKET ANALYSIS:\n` +
+              `- Current TON ecosystem trends and price movements\n` +
+              `- DeFi yield opportunities and risks for ${userState.lastWalletData.balanceTON} TON\n` +
+              `- Optimal portfolio allocation strategies\n\n` +
+              `🐦 SOCIAL SENTIMENT:\n` +
+              `- Scan X (Twitter) for recent tweets from key crypto influencers about TON, DeFi, and relevant projects\n` +
+              `- Look for tweets from: @ton_blockchain, @durov, major DeFi protocol founders, crypto analysts\n` +
+              `- Analyze sentiment around TON ecosystem developments\n\n` +
+              `⚡ TECHNICAL RESEARCH:\n` +
+              `- Check GitHub activity for major TON DeFi projects (DeDust, STON.fi, Tonstakers, etc.)\n` +
+              `- Look for recent commits, updates, and development activity\n` +
+              `- Identify emerging protocols with active development\n\n` +
+              `💡 STRATEGY OUTPUT:\n` +
+              `- Specific investment allocations with rationale\n` +
+              `- Risk management for ${userState.lastWalletData.balanceTON} TON portfolio size\n` +
+              `- Timeline and entry/exit strategies\n` +
+              `- Current opportunities based on social sentiment and dev activity`;
+            
+            const strategyResponse = await forwardToStrategy(
+              strategyPrompt, 
+              userId, 
+              userState.lastWalletData, 
+              requestId
+            );
+            
+            // Debug: Log what we got back from strategy function
+            logger.info('Strategy function returned', {
+              userId,
+              requestId,
+              responseType: typeof strategyResponse,
+              isObject: typeof strategyResponse === 'object',
+              hasError: typeof strategyResponse === 'object' && strategyResponse.error,
+              hasMessage: typeof strategyResponse === 'object' && strategyResponse.message,
+              responsePreview: typeof strategyResponse === 'string' ? strategyResponse.substring(0, 100) + '...' : JSON.stringify(strategyResponse)
+            });
+            
+            // Clear all timers since we got a response
+            timers.forEach(timer => clearTimeout(timer));
+            
+            // Check if we got an error response
+            if (typeof strategyResponse === 'object' && strategyResponse.error) {
+              responseMessage = '❌ **Strategy Analysis Failed**\n\n' + strategyResponse.message;
+            } else if (typeof strategyResponse === 'object' && strategyResponse.message) {
+              responseMessage = '✅ **Your Personalized Strategy is Ready!**\n\n' + strategyResponse.message;
+            } else {
+              responseMessage = '✅ **Your Personalized Strategy is Ready!**\n\n' + strategyResponse;
+            }
+            
+            // Send the strategy response to Telegram
+            await sendTelegramMessage(chatId, responseMessage);
+            
+            // Clear user state after strategy response
+            clearUserState(userId);
+            
+          } catch (strategyError) {
+            // Clear all timers on error
+            timers.forEach(timer => clearTimeout(timer));
+            
+            logger.error('Strategy analysis failed', {
+              userId,
+              requestId,
+              error: strategyError.message
+            });
+            
+            responseMessage = '❌ **Strategy Analysis Failed**\n\n' +
+              'I encountered an error while analyzing your portfolio. Please try again in a moment, or ask me any other crypto questions!';
+            
+            // Send error message to Telegram
+            await sendTelegramMessage(chatId, responseMessage);
+            
+            clearUserState(userId);
+          }
+          
+          // Strategy response handled and sent above
+          const totalDuration = Date.now() - processingStartTime;
+          logger.info('Strategy processing completed', {
+            userId,
+            userName,
+            requestId,
+            totalDuration: `${totalDuration}ms`,
+            success: !responseMessage.includes('Failed')
+          });
+          return; // Exit early since we handled the response
+          
+        } else {
+          // No context for "yes" - treat as basic question
+          logger.info('Affirmative response without context, treating as basic question', {
+            userId,
+            requestId,
+            userContext: userState.context
+          });
+          
+          const basicResponse = await forwardToBasic(messageText, userId, requestId);
+          responseMessage = typeof basicResponse === 'object' ? basicResponse.message : basicResponse;
+        }
+        break;
+        
+      case 'negative':
+        // Handle "no" responses - clear state and ask how else to help
+        logger.info('User declined or responded negatively', {
           userId,
+          userName,
           requestId,
-          walletType: walletDetected.type,
-          error: walletError.message
+          userContext: userState.context
         });
         
-        // Fallback to showing error and continuing to n8n
-        await sendTelegramMessage(chatId, 
-          `❌ I detected a ${walletDetected.type} wallet address but couldn't process it right now. Let me help you with general crypto questions instead!`
-        );
-        // Continue to n8n processing below...
-      }
-    }
-    
-    // Forward message to n8n and get AI response (for non-wallet messages or wallet fallback)
-    logger.info('Processing message', {
-      userId,
-      userName,
-      requestId,
-      messageLength: messageText.length,
-      walletDetected: !!walletDetected
-    });
-    
-    const n8nResponse = await forwardToN8n(messageText, userId, requestId);
-    
-    // Extract message from response
-    let responseMessage;
-    if (typeof n8nResponse === 'object' && n8nResponse.message) {
-      responseMessage = n8nResponse.message;
-    } else if (typeof n8nResponse === 'string') {
-      responseMessage = n8nResponse;
-    } else {
-      responseMessage = "I processed your question but got an unexpected response format. Please try again.";
+        clearUserState(userId);
+        responseMessage = "No worries! Is there anything else I can help you with regarding crypto or DeFi?";
+        break;
+        
+      case 'basic_question':
+      default:
+        // Handle basic questions - forward to basic endpoint
+        logger.info('Processing basic question', {
+          userId,
+          userName,
+          requestId,
+          messageLength: messageText.length
+        });
+        
+        const basicResponse = await forwardToBasic(messageText, userId, requestId);
+        responseMessage = typeof basicResponse === 'object' ? basicResponse.message : basicResponse;
+        
+        // Clear any previous state since user is asking new questions
+        clearUserState(userId);
+        break;
     }
     
     // Send response back to user
@@ -469,6 +788,7 @@ async function processMessage(chatId, messageText, userId, userName, requestId) 
       userId,
       userName,
       requestId,
+      intentType: intent.type,
       totalDuration: `${totalDuration}ms`,
       responseLength: responseMessage.length
     });
@@ -483,6 +803,9 @@ async function processMessage(chatId, messageText, userId, userName, requestId) 
       requestId,
       totalDuration: `${totalDuration}ms`
     });
+    
+    // Clear user state on error
+    clearUserState(userId);
     
     await sendTelegramMessage(chatId, 
       "Sorry, I encountered an error processing your request. Please try again in a moment."
